@@ -10,6 +10,8 @@ RUN npm install --omit=dev && \
 
 COPY . .
 
+WORKDIR /app/server
+
 EXPOSE 5000
 
-CMD ["npm", "start"]
+CMD ["node", "app.js"]
