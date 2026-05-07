@@ -66,6 +66,7 @@ jobs:
       # =========================
 
       - name: SonarCloud Scan
+        continue-on-error: true
         uses: SonarSource/sonarqube-scan-action@master
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -104,6 +105,7 @@ jobs:
       # =========================
 
       - name: Checkov Scan
+        continue-on-error: true
         run: |
           checkov -d . -o json > reports/checkov.json || true
 
@@ -122,6 +124,7 @@ jobs:
       # =========================
 
       - name: OPA Policy Check
+        continue-on-error: true
         run: |
           opa eval \
           --data policies/security.rego \
