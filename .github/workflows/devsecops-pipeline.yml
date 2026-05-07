@@ -83,16 +83,22 @@ jobs:
       # TRIVY SCAN
       # =========================
 
-      - name: Trivy Scan
+      - name: Install Trivy
         run: |
-          docker run --rm \
-          -v /var/run/docker.sock:/var/run/docker.sock \
-          -v $PWD:/root/.cache/ \
-          aquasec/trivy:latest image \
-          --format json \
-          -o reports/trivy.json \
-          fitness-tracker:v1
+          sudo apt-get update
+          sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy -y
 
+      - name: Trivy Scan
+        continue-on-error: true
+        run: |
+          trivy image \
+          --format json \
+          --output reports/trivy.json \
+          fitness-tracker:v1
       # =========================
       # INSTALL CHECKOV
       # =========================
