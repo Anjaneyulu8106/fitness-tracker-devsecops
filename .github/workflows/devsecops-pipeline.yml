@@ -1,0 +1,238 @@
+# FILE LOCATION:
+# Fitness_Tracker/.github/workflows/devsecops-pipeline.yml
+
+name: Enterprise DevSecOps Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+
+  security-scan:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # =========================
+      # DETECT STACK
+      # =========================
+
+      - name: Detect Stack
+        run: bash scripts/detect-stack.sh
+
+      # =========================
+      # SETUP NODE
+      # =========================
+
+      - name: Setup Node
+        if: env.NODE == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      # =========================
+      # INSTALL DEPENDENCIES
+      # =========================
+
+      - name: Install Dependencies
+        if: env.NODE == 'true'
+        run: npm install
+
+      # =========================
+      # GITLEAKS
+      # =========================
+
+      - name: GitLeaks Scan
+        uses: zricethezav/gitleaks-action@master
+
+      # =========================
+      # NPM AUDIT
+      # =========================
+
+      - name: npm Audit
+        run: |
+          mkdir -p reports
+          npm audit --json > reports/npm-audit.json || true
+
+      # =========================
+      # SONARCLOUD
+      # =========================
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      # =========================
+      # BUILD DOCKER IMAGE
+      # =========================
+
+      - name: Build Docker Image
+        run: |
+          docker build -t fitness-tracker:v1 .
+
+      # =========================
+      # TRIVY SCAN
+      # =========================
+
+      - name: Trivy Scan
+        run: |
+          docker run --rm \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -v $PWD:/root/.cache/ \
+          aquasec/trivy:latest image \
+          --format json \
+          -o reports/trivy.json \
+          fitness-tracker:v1
+
+      # =========================
+      # INSTALL CHECKOV
+      # =========================
+
+      - name: Install Checkov
+        run: pip install checkov
+
+      # =========================
+      # CHECKOV SCAN
+      # =========================
+
+      - name: Checkov Scan
+        run: |
+          checkov -d . -o json > reports/checkov.json || true
+
+      # =========================
+      # INSTALL OPA
+      # =========================
+
+      - name: Install OPA
+        run: |
+          curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static
+          chmod +x opa
+          sudo mv opa /usr/local/bin/
+
+      # =========================
+      # OPA POLICY CHECK
+      # =========================
+
+      - name: OPA Policy Check
+        run: |
+          opa eval \
+          --data policies/security.rego \
+          --input app-deployment.yaml \
+          "data.security.deny"
+
+      # =========================
+      # DECISION ENGINE
+      # =========================
+
+      - name: Run Decision Engine
+        run: bash scripts/decision-engine.sh
+
+      # =========================
+      # FAIL PIPELINE
+      # =========================
+
+      - name: Fail Pipeline
+        if: env.BLOCK_DEPLOY == 'true'
+        run: |
+          echo "Critical vulnerabilities detected"
+          exit 1
+
+      # =========================
+      # INSTALL PYTHON PACKAGES
+      # =========================
+
+      - name: Install Python Packages
+        run: |
+          pip install pandas openpyxl xlsxwriter
+
+      # =========================
+      # GENERATE EXCEL REPORT
+      # =========================
+
+      - name: Generate Excel Report
+        run: python scripts/generate-report.py
+
+      # =========================
+      # UPLOAD REPORTS
+      # =========================
+
+      - name: Upload Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: reports/
+
+      # =========================
+      # SEND FAILURE MAIL
+      # =========================
+
+      - name: Send Failure Mail
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: DevSecOps Pipeline Failed
+          body: |
+            Critical vulnerabilities detected.
+            Manual approval required.
+          to: ${{ secrets.MAIL_TO }}
+          from: DevSecOps Bot
+
+  # ====================================
+  # DEPLOYMENT JOB
+  # ====================================
+
+  deploy:
+
+    needs: security-scan
+
+    if: success()
+
+    environment:
+      name: production
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # =========================
+      # CONFIGURE AWS
+      # =========================
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      # =========================
+      # CONFIGURE KUBECTL
+      # =========================
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+          --name ${{ secrets.EKS_CLUSTER_NAME }} \
+          --region ap-south-1
+
+      # =========================
+      # DEPLOY TO EKS
+      # =========================
+
+      - name: Deploy to EKS
+        run: |
+          kubectl apply -f .
