@@ -2,6 +2,9 @@ name: Dynamic DevSecOps Pipeline with EKS
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
 
@@ -15,7 +18,10 @@ jobs:
 
       - name: Verify Project
         run: |
-          echo "Customer project intake successful"
+          echo "=================================="
+          echo "Customer Project Intake Successful"
+          echo "=================================="
+
           ls -la
 
   security_scans:
@@ -25,12 +31,166 @@ jobs:
     needs: setup
 
     steps:
+
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Run Basic Scan
+      - name: Create Reports Folder
+        run: mkdir -p reports
+
+      # =========================================
+      # DYNAMIC STACK DETECTION
+      # =========================================
+
+      - name: Detect Application Stack
         run: |
-          echo "Running enterprise security scans"
+          chmod +x scripts/detect-stack.sh
+          bash scripts/detect-stack.sh
+
+      # =========================================
+      # SETUP NODE
+      # =========================================
+
+      - name: Setup Node
+        if: env.NODE == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      # =========================================
+      # INSTALL DEPENDENCIES
+      # =========================================
+
+      - name: Install Dependencies
+        if: env.NODE == 'true'
+        run: |
+          npm install || true
+
+      # =========================================
+      # GITLEAKS
+      # =========================================
+
+      - name: GitLeaks Secret Scan
+        continue-on-error: true
+        uses: zricethezav/gitleaks-action@master
+
+      # =========================================
+      # NPM AUDIT
+      # =========================================
+
+      - name: Dependency Vulnerability Scan
+        continue-on-error: true
+        run: |
+          npm audit --json > reports/npm-audit.json || true
+
+      # =========================================
+      # BUILD IMAGE
+      # =========================================
+
+      - name: Build Docker Image
+        continue-on-error: true
+        run: |
+          docker build -t fitness-tracker:v1 .
+
+      # =========================================
+      # INSTALL TRIVY
+      # =========================================
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+
+          sudo apt-get update
+          sudo apt-get install trivy -y
+
+      # =========================================
+      # TRIVY SCAN
+      # =========================================
+
+      - name: Trivy Scan
+        continue-on-error: true
+        run: |
+          trivy image \
+          --format json \
+          --output reports/trivy.json \
+          fitness-tracker:v1
+
+      # =========================================
+      # INSTALL PYTHON
+      # =========================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # =========================================
+      # INSTALL CHECKOV
+      # =========================================
+
+      - name: Install Checkov
+        run: pip install checkov
+
+      # =========================================
+      # CHECKOV SCAN
+      # =========================================
+
+      - name: Checkov Scan
+        continue-on-error: true
+        run: |
+          checkov -d . -o json > reports/checkov.json || true
+
+      # =========================================
+      # INSTALL OPA
+      # =========================================
+
+      - name: Install OPA
+        run: |
+          curl -L -o opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static
+
+          chmod +x opa
+
+          sudo mv opa /usr/local/bin/
+
+      # =========================================
+      # OPA POLICY CHECK
+      # =========================================
+
+      - name: OPA Policy Check
+        continue-on-error: true
+        run: |
+          opa eval \
+          --data policies/security.rego \
+          --input app-deployment.yaml \
+          "data.security.deny"
+
+      # =========================================
+      # DECISION ENGINE
+      # =========================================
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Run Decision Engine
+        continue-on-error: true
+        run: |
+          chmod +x scripts/decision-engine.sh
+          bash scripts/decision-engine.sh
+
+      # =========================================
+      # UPLOAD RAW REPORTS
+      # =========================================
+
+      - name: Upload Raw Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-security-reports
+          path: reports/
 
   excel_report:
     name: Generate Excel Security Report
@@ -39,9 +199,34 @@ jobs:
     needs: security_scans
 
     steps:
-      - name: Report Stage
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Reports
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-security-reports
+          path: reports/
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Packages
         run: |
-          echo "Generating enterprise Excel report"
+          pip install pandas openpyxl xlsxwriter
+
+      - name: Generate Excel Report
+        run: |
+          python scripts/generate-report.py
+
+      - name: Upload Excel Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-excel-report
+          path: reports/security-report.xlsx
 
   send_email_alert:
     name: Send Email Alert If Policy Failed
@@ -50,9 +235,23 @@ jobs:
     needs: excel_report
 
     steps:
-      - name: Mail Stage
-        run: |
-          echo "Sending security alerts"
+
+      - name: Send Mail
+        continue-on-error: true
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: Enterprise DevSecOps Alert
+          body: |
+            Vulnerabilities detected in customer application.
+
+            Please review security reports.
+
+          to: ${{ secrets.MAIL_TO }}
+          from: DevSecOps Pipeline
 
   manual_approval:
     name: Manual Approval Before Deployment
@@ -64,7 +263,8 @@ jobs:
       name: vulnerability-review
 
     steps:
-      - name: Waiting Approval
+
+      - name: Approval Stage
         run: |
           echo "Waiting for reviewer approval"
 
@@ -74,7 +274,10 @@ jobs:
 
     needs: manual_approval
 
+    if: false
+
     steps:
+
       - name: Deployment Stage
         run: |
-          echo "Deploying to EKS"
+          echo "EKS deployment temporarily disabled"
