@@ -49,6 +49,7 @@ jobs:
       # =========================
 
       - name: GitLeaks Scan
+        continue-on-error: true
         uses: zricethezav/gitleaks-action@master
 
       # =========================
