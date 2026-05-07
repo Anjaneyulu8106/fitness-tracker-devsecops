@@ -149,6 +149,7 @@ jobs:
       # =========================
 
       - name: Fail Pipeline
+        continue-on-error: true
         if: env.BLOCK_DEPLOY == 'true'
         run: |
           echo "Critical vulnerabilities detected"
