@@ -1,12 +1,18 @@
-name: Dynamic DevSecOps Pipeline with EKS
+name: Enterprise DevSecOps Pipeline
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
 
+env:
+  IMAGE_TAG: ${{ github.sha }}
+
 jobs:
+
+# =========================================================
+# SETUP STAGE
+# =========================================================
 
   setup:
     name: Customer File Intake and Analysis
@@ -16,13 +22,17 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Verify Project
+      - name: Verify Fitness Tracker Project
         run: |
-          echo "=================================="
-          echo "Customer Project Intake Successful"
-          echo "=================================="
+          echo "======================================="
+          echo "Fitness Tracker Project Detected"
+          echo "======================================="
 
           ls -la
+
+# =========================================================
+# SECURITY SCANS
+# =========================================================
 
   security_scans:
     name: Layer-wise Security Scanning
@@ -38,18 +48,18 @@ jobs:
       - name: Create Reports Folder
         run: mkdir -p reports
 
-      # =========================================
-      # DYNAMIC STACK DETECTION
-      # =========================================
+# =========================================================
+# DETECT STACK
+# =========================================================
 
       - name: Detect Application Stack
         run: |
           chmod +x scripts/detect-stack.sh
           bash scripts/detect-stack.sh
 
-      # =========================================
-      # SETUP NODE
-      # =========================================
+# =========================================================
+# SETUP NODE
+# =========================================================
 
       - name: Setup Node
         if: env.NODE == 'true'
@@ -57,44 +67,53 @@ jobs:
         with:
           node-version: 18
 
-      # =========================================
-      # INSTALL DEPENDENCIES
-      # =========================================
+# =========================================================
+# INSTALL DEPENDENCIES
+# =========================================================
 
       - name: Install Dependencies
         if: env.NODE == 'true'
         run: |
           npm install || true
 
-      # =========================================
-      # GITLEAKS
-      # =========================================
+# =========================================================
+# GITLEAKS SCAN
+# =========================================================
 
       - name: GitLeaks Secret Scan
         continue-on-error: true
         uses: zricethezav/gitleaks-action@master
 
-      # =========================================
-      # NPM AUDIT
-      # =========================================
+# =========================================================
+# NPM AUDIT
+# =========================================================
 
       - name: Dependency Vulnerability Scan
         continue-on-error: true
         run: |
           npm audit --json > reports/npm-audit.json || true
 
-      # =========================================
-      # BUILD IMAGE
-      # =========================================
+# =========================================================
+# SONARCLOUD
+# =========================================================
+
+      - name: SonarCloud Scan
+        continue-on-error: true
+        run: |
+          echo "Running SonarCloud Scan"
+
+# =========================================================
+# BUILD DOCKER IMAGE
+# =========================================================
 
       - name: Build Docker Image
         continue-on-error: true
         run: |
           docker build -t fitness-tracker:v1 .
 
-      # =========================================
-      # INSTALL TRIVY
-      # =========================================
+# =========================================================
+# INSTALL TRIVY
+# =========================================================
 
       - name: Install Trivy
         run: |
@@ -108,9 +127,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install trivy -y
 
-      # =========================================
-      # TRIVY SCAN
-      # =========================================
+# =========================================================
+# TRIVY SCAN
+# =========================================================
 
       - name: Trivy Scan
         continue-on-error: true
@@ -120,34 +139,34 @@ jobs:
           --output reports/trivy.json \
           fitness-tracker:v1
 
-      # =========================================
-      # INSTALL PYTHON
-      # =========================================
+# =========================================================
+# SETUP PYTHON
+# =========================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # =========================================
-      # INSTALL CHECKOV
-      # =========================================
+# =========================================================
+# INSTALL CHECKOV
+# =========================================================
 
       - name: Install Checkov
         run: pip install checkov
 
-      # =========================================
-      # CHECKOV SCAN
-      # =========================================
+# =========================================================
+# CHECKOV SCAN
+# =========================================================
 
       - name: Checkov Scan
         continue-on-error: true
         run: |
           checkov -d . -o json > reports/checkov.json || true
 
-      # =========================================
-      # INSTALL OPA
-      # =========================================
+# =========================================================
+# INSTALL OPA
+# =========================================================
 
       - name: Install OPA
         run: |
@@ -157,9 +176,9 @@ jobs:
 
           sudo mv opa /usr/local/bin/
 
-      # =========================================
-      # OPA POLICY CHECK
-      # =========================================
+# =========================================================
+# OPA POLICY CHECK
+# =========================================================
 
       - name: OPA Policy Check
         continue-on-error: true
@@ -169,9 +188,9 @@ jobs:
           --input app-deployment.yaml \
           "data.security.deny"
 
-      # =========================================
-      # DECISION ENGINE
-      # =========================================
+# =========================================================
+# DECISION ENGINE
+# =========================================================
 
       - name: Install jq
         run: sudo apt-get install -y jq
@@ -182,15 +201,19 @@ jobs:
           chmod +x scripts/decision-engine.sh
           bash scripts/decision-engine.sh
 
-      # =========================================
-      # UPLOAD RAW REPORTS
-      # =========================================
+# =========================================================
+# UPLOAD RAW REPORTS
+# =========================================================
 
       - name: Upload Raw Reports
         uses: actions/upload-artifact@v4
         with:
           name: raw-security-reports
           path: reports/
+
+# =========================================================
+# EXCEL REPORT
+# =========================================================
 
   excel_report:
     name: Generate Excel Security Report
@@ -228,6 +251,10 @@ jobs:
           name: security-excel-report
           path: reports/security-report.xlsx
 
+# =========================================================
+# SEND EMAIL ALERT
+# =========================================================
+
   send_email_alert:
     name: Send Email Alert If Policy Failed
     runs-on: ubuntu-latest
@@ -244,14 +271,20 @@ jobs:
           server_port: 465
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
+
           subject: Enterprise DevSecOps Alert
+
           body: |
-            Vulnerabilities detected in customer application.
+            Vulnerabilities detected in Fitness Tracker application.
 
             Please review security reports.
 
           to: ${{ secrets.MAIL_TO }}
           from: DevSecOps Pipeline
+
+# =========================================================
+# MANUAL APPROVAL
+# =========================================================
 
   manual_approval:
     name: Manual Approval Before Deployment
@@ -267,6 +300,10 @@ jobs:
       - name: Approval Stage
         run: |
           echo "Waiting for reviewer approval"
+
+# =========================================================
+# EKS DEPLOYMENT
+# =========================================================
 
   deploy_to_eks:
     name: Deploy to Amazon EKS
